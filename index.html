@@ -41,9 +41,14 @@
       display: flex;
       flex-direction: column;
       gap: var(--gap);
+      background: var(--bg);
     }
+    /* Secret cue when the force is toggled: the split line glows faintly once. */
+    #stage.cue { animation: cue .6s ease-out; }
+    @keyframes cue { 25% { background: #3c3c3c; } }
     .half {
       position: relative;
+      background: var(--bg);
       width: 100%;
       overflow: hidden;
       touch-action: none;
@@ -165,25 +170,24 @@
     const ALL = SUITS.flatMap(s => RANKS.map(r => `${r}_of_${s}`));
     const src = name => `cards/${name}.webp`;
 
+    // The two forced cards. Each half alternates between them, never both on the same one.
+    const FORCE = ['9_of_diamonds', 'king_of_clubs'];
+    const isForce = c => FORCE.includes(c);
+    const otherForce = c => (c === FORCE[0] ? FORCE[1] : FORCE[0]);
+
     // Preload every face so the carousel never shows a blank card.
     ALL.forEach(n => { const i = new Image(); i.src = src(n); });
 
-    const shuffle = a => {
-      a = a.slice();
-      for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-      }
-      return a;
-    };
-    const mod = (n, m) => ((n % m) + m) % m;
-
     // Physics tuning
-    const FLING = 650;      // ms: how far a fling carries (distance = velocity × FLING)
-    const POWER = 3;        // ease-out power; initial animation speed matches release speed
+    const FLING = 650;       // ms: how far a fling carries (distance = velocity × FLING)
+    const POWER = 3;         // ease-out power; initial animation speed matches release speed
     const MIN_DUR = 280, MAX_DUR = 2600;
     const TAP_PX = 8;
-    const POOL = 7;         // cards rendered per half (centre ± 3)
+    const POOL = 9;          // cards rendered per half (centre ± 4)
+    const WIN = Math.floor(POOL / 2);
+    const FORCE_MIN = 6;     // a forced spin travels at least this many cards
+    const LONG_PRESS = 650;  // ms
+    const NO_REPEAT = 14;    // no duplicate card within this many positions
 
     const stage = document.getElementById('stage');
     const flash = document.getElementById('flash');
@@ -194,17 +198,13 @@
 
     let cardW = 0, cardH = 0, spacing = 0, viewW = 0;
     let swipedSinceResult = false;
+    let forceArmed = false;
 
+    // Each half is an endless strip. Cards are dealt lazily per position and then
+    // stay put, so scrolling back shows the same cards. A forced landing writes the
+    // forced card into a position that hasn't been dealt yet.
     function makeHalf(el, name) {
-      const half = {
-        name, el,
-        deck: shuffle(ALL),
-        pos: 0,
-        anim: null,
-        drag: null,
-        cards: [],
-        dirty: true,
-      };
+      const half = { name, el, seq: new Map(), pos: 0, anim: null, drag: null, cards: [], dirty: true, rested: null };
       for (let k = 0; k < POOL; k++) {
         const c = document.createElement('div');
         c.className = 'card';
@@ -215,15 +215,41 @@
       return half;
     }
 
+    function deal(h, i) {
+      const near = new Set();
+      for (let j = i - NO_REPEAT; j <= i + NO_REPEAT; j++) {
+        if (h.seq.has(j)) near.add(h.seq.get(j));
+      }
+      let pool = ALL.filter(c => !near.has(c) && !(forceArmed && isForce(c)));
+      if (!pool.length) pool = ALL;
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    function cardAt(h, i) {
+      if (!h.seq.has(i)) h.seq.set(i, deal(h, i));
+      return h.seq.get(i);
+    }
+
+    // Forget dealt cards that are off screen, so they can be re-dealt unnoticed.
+    const onScreen = (h, i) => Math.abs(i - h.pos) * spacing - cardW / 2 < viewW / 2 + 4;
+    function forgetOffscreen(h) {
+      for (const i of [...h.seq.keys()]) if (!onScreen(h, i)) h.seq.delete(i);
+    }
+
     const top = makeHalf(document.querySelector('.half.top'), 'top');
     const bottom = makeHalf(document.querySelector('.half.bottom'), 'bottom');
     const halves = [top, bottom];
+    const partner = h => (h === top ? bottom : top);
 
     // Start on two different cards.
-    if (top.deck[0] === bottom.deck[0]) bottom.deck.push(bottom.deck.shift());
+    top.seq.set(0, ALL[Math.floor(Math.random() * ALL.length)]);
+    do { bottom.seq.set(0, ALL[Math.floor(Math.random() * ALL.length)]); }
+    while (bottom.seq.get(0) === top.seq.get(0));
+    top.rested = top.seq.get(0);
+    bottom.rested = bottom.seq.get(0);
 
     const busy = h => !!(h.drag || h.anim);
-    const current = h => h.deck[mod(Math.round(h.pos), h.deck.length)];
+    const current = h => cardAt(h, Math.round(h.pos));
 
     function layout() {
       viewW = window.innerWidth;
@@ -244,11 +270,10 @@
 
     function render(h) {
       const base = Math.round(h.pos);
-      const half = Math.floor(POOL / 2);
       for (let k = 0; k < POOL; k++) {
-        const i = base + k - half;
+        const i = base + k - WIN;
         const c = h.cards[k];
-        const name = h.deck[mod(i, h.deck.length)];
+        const name = cardAt(h, i);
         if (c.dataset.idx !== name) {
           c.dataset.idx = name;
           c.style.backgroundImage = `url("${src(name)}")`;
@@ -265,18 +290,15 @@
 
     // ---------- Animation ----------
     function animateTo(h, target, duration, onDone) {
-      const from = h.pos;
-      const t0 = performance.now();
-      h.anim = { from, target, t0, duration, onDone };
+      h.anim = { from: h.pos, target, t0: performance.now(), duration, onDone };
     }
 
     function step(now) {
       halves.forEach(h => {
         if (h.anim) {
-          const { from, target, t0, duration, onDone, ease } = h.anim;
+          const { from, target, t0, duration, onDone } = h.anim;
           const t = Math.min(1, (now - t0) / duration);
-          const e = ease ? ease(t) : 1 - Math.pow(1 - t, POWER);
-          h.pos = from + (target - from) * e;
+          h.pos = from + (target - from) * (1 - Math.pow(1 - t, POWER));
           h.dirty = true;
           if (t >= 1) {
             h.pos = target;
@@ -289,12 +311,40 @@
       requestAnimationFrame(step);
     }
 
+    // ---------- Force ----------
+    // Which forced card should half h land on next?
+    // The card a half has settled on, or is spinning toward.
+    const landing = h => (h.anim ? cardAt(h, h.anim.target) : h.rested);
+
+    function nextForced(h) {
+      const mine = h.rested;
+      const theirs = landing(partner(h));
+      const taken = isForce(theirs) ? theirs : null;
+      // Alternate if already on a forced card; otherwise start on the 9♦.
+      let pick = isForce(mine) ? otherForce(mine) : FORCE[0];
+      // Never let both halves show the same forced card.
+      if (pick === taken) pick = otherForce(pick);
+      return pick;
+    }
+
+    function cue() {
+      stage.classList.remove('cue');
+      void stage.offsetWidth;
+      stage.classList.add('cue');
+      if (navigator.vibrate) navigator.vibrate(forceArmed ? 15 : [10, 60, 10]);
+    }
+
+    function toggleForce() {
+      forceArmed = !forceArmed;
+      cue();
+    }
+
     // ---------- Result ----------
-    function settled() {
+    function settled(h) {
+      h.rested = current(h);
       if (!swipedSinceResult || halves.some(busy)) return;
       swipedSinceResult = false;
-      const match = current(top) === current(bottom);
-      showResult(match);
+      showResult(current(top) === current(bottom));
     }
 
     function showResult(match) {
@@ -327,16 +377,25 @@
           x0: e.clientX,
           pos0: h.pos,
           moved: 0,
+          longPressed: false,
           samples: [{ t: performance.now(), x: e.clientX }],
         };
+        const d = h.drag;
+        d.timer = setTimeout(() => {
+          if (h.drag === d && d.moved <= TAP_PX) {
+            d.longPressed = true;
+            toggleForce();
+          }
+        }, LONG_PRESS);
         cancelIntro();
       });
 
       el.addEventListener('pointermove', e => {
         const d = h.drag;
-        if (!d || e.pointerId !== d.id) return;
+        if (!d || e.pointerId !== d.id || d.longPressed) return;
         const dx = e.clientX - d.x0;
         d.moved = Math.max(d.moved, Math.abs(dx));
+        if (d.moved > TAP_PX) clearTimeout(d.timer);
         h.pos = d.pos0 - dx / spacing;
         h.dirty = true;
         const now = performance.now();
@@ -351,6 +410,7 @@
       const release = e => {
         const d = h.drag;
         if (!d || e.pointerId !== d.id) return;
+        clearTimeout(d.timer);
         h.drag = null;
 
         // Velocity in cards per ms from the last ~100ms of movement.
@@ -359,22 +419,40 @@
         let v = 0;
         if (recent.length >= 2) {
           const a = recent[0], b = recent[recent.length - 1];
-          const dt = Math.max(b.t - a.t, 1);
-          v = -((b.x - a.x) / dt) / spacing;
+          v = -((b.x - a.x) / Math.max(b.t - a.t, 1)) / spacing;
         }
 
-        const isSwipe = d.moved > TAP_PX;
-        if (isSwipe) swipedSinceResult = true;
+        const isSwipe = d.moved > TAP_PX && !d.longPressed;
+        if (!isSwipe) {
+          animateTo(h, Math.round(h.pos), MIN_DUR, () => { h.rested = current(h); });
+          return;
+        }
+        swipedSinceResult = true;
 
+        const base = Math.round(h.pos);
         let target = Math.round(h.pos + v * FLING);
-        if (target === Math.round(h.pos) && isSwipe && Math.abs(v) > 0.0015) {
+
+        if (forceArmed) {
+          // Spin in the swipe direction, far enough that the landing spot is off
+          // screen right now, then deal the forced card into that spot.
+          const dir = Math.sign(v) || Math.sign(h.pos - d.pos0) || 1;
+          const n = Math.max((target - base) * dir, FORCE_MIN);
+          target = base + dir * n;
+          const pick = nextForced(h);
+          // Re-deal everything off screen (without the forced cards, so they
+          // don't flash past on the way), then plant the forced card.
+          forgetOffscreen(h);
+          h.seq.set(target, pick);
+        } else if (target === base && Math.abs(v) > 0.0015) {
           // A quick flick should always move at least one card.
           target += Math.sign(v);
         }
+
         const dist = Math.abs(target - h.pos);
-        let dur = Math.abs(v) > 0.0002 ? (POWER * dist) / Math.abs(v) : MIN_DUR;
+        const speed = Math.max(Math.abs(v), forceArmed ? 0.004 : 0);
+        let dur = speed > 0.0002 ? (POWER * dist) / speed : MIN_DUR;
         dur = Math.max(MIN_DUR, Math.min(MAX_DUR, dur));
-        animateTo(h, target, dur, settled);
+        animateTo(h, target, dur, () => settled(h));
       };
 
       el.addEventListener('pointerup', release);
