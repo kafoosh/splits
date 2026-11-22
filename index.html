@@ -344,7 +344,10 @@
       h.rested = current(h);
       if (!swipedSinceResult || halves.some(busy)) return;
       swipedSinceResult = false;
-      showResult(current(top) === current(bottom));
+      const a = current(top), b = current(bottom);
+      showResult(a === b);
+      // The force switches itself off (silently) once the split 9♦ / K♣ is shown.
+      if (forceArmed && a !== b && isForce(a) && isForce(b)) forceArmed = false;
     }
 
     function showResult(match) {
