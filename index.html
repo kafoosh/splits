@@ -377,25 +377,16 @@
           x0: e.clientX,
           pos0: h.pos,
           moved: 0,
-          longPressed: false,
           samples: [{ t: performance.now(), x: e.clientX }],
         };
-        const d = h.drag;
-        d.timer = setTimeout(() => {
-          if (h.drag === d && d.moved <= TAP_PX) {
-            d.longPressed = true;
-            toggleForce();
-          }
-        }, LONG_PRESS);
         cancelIntro();
       });
 
       el.addEventListener('pointermove', e => {
         const d = h.drag;
-        if (!d || e.pointerId !== d.id || d.longPressed) return;
+        if (!d || e.pointerId !== d.id) return;
         const dx = e.clientX - d.x0;
         d.moved = Math.max(d.moved, Math.abs(dx));
-        if (d.moved > TAP_PX) clearTimeout(d.timer);
         h.pos = d.pos0 - dx / spacing;
         h.dirty = true;
         const now = performance.now();
@@ -410,7 +401,6 @@
       const release = e => {
         const d = h.drag;
         if (!d || e.pointerId !== d.id) return;
-        clearTimeout(d.timer);
         h.drag = null;
 
         // Velocity in cards per ms from the last ~100ms of movement.
@@ -422,7 +412,7 @@
           v = -((b.x - a.x) / Math.max(b.t - a.t, 1)) / spacing;
         }
 
-        const isSwipe = d.moved > TAP_PX && !d.longPressed;
+        const isSwipe = d.moved > TAP_PX;
         if (!isSwipe) {
           animateTo(h, Math.round(h.pos), MIN_DUR, () => { h.rested = current(h); });
           return;
@@ -460,6 +450,26 @@
     }
 
     halves.forEach(attach);
+
+    // Secret: a long press on the background (anywhere off the card strips)
+    // toggles the force.
+    let press = null;
+    const endPress = e => {
+      if (press && (!e || e.pointerId === press.id)) { clearTimeout(press.timer); press = null; }
+    };
+    document.addEventListener('pointerdown', e => {
+      if (e.target.closest('.half') || press) return;
+      press = {
+        id: e.pointerId, x: e.clientX, y: e.clientY,
+        timer: setTimeout(() => { press = null; toggleForce(); }, LONG_PRESS),
+      };
+    });
+    document.addEventListener('pointermove', e => {
+      if (press && e.pointerId === press.id &&
+          Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_PX) endPress(e);
+    });
+    document.addEventListener('pointerup', endPress);
+    document.addEventListener('pointercancel', endPress);
 
     // ---------- Intro: a small peek to show each half moves ----------
     let introTimers = [];
